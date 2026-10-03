@@ -39,6 +39,41 @@
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
+// nesting deeper than any legitimate decision request; parsing and serializing such input
+// recurses per level and can exhaust the thread stack, so check the raw body before parsing
+constexpr int SERVER_SYSTEMONE_MAX_JSON_DEPTH = 64;
+
+static bool server_json_depth_within(const std::string & body, int max_depth) {
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char c : body) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) {
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            if (++depth > max_depth) {
+                return false;
+            }
+        } else if (c == '}' || c == ']') {
+            depth--;
+        }
+    }
+    return true;
+}
+
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
@@ -5448,6 +5483,11 @@ void server_routes::init_routes() {
         const auto & decision = ctx_server.decision;
         if (decision.type == COMMON_DECISION_TYPE_NONE) {
             res->error(format_error_response("This model is not a decision model", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
+
+        if (!server_json_depth_within(req.body, SERVER_SYSTEMONE_MAX_JSON_DEPTH)) {
+            res->error(format_error_response("JSON nesting depth exceeds the maximum of 64", ERROR_TYPE_INVALID_REQUEST));
             return res;
         }
 
